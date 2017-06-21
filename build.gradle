@@ -1,0 +1,172 @@
+plugins {
+    id 'base'
+    id 'cpp'
+    id 'maven-publish'
+
+    id 'org.ajoberstar.grgit' version '1.7.1'
+    id 'org.ajoberstar.release-base' version '1.7.1'
+    id 'org.ajoberstar.release-opinion' version '1.7.1'
+}
+
+println "nexus repo is: ${project.'nexus.repo'}"
+
+import org.gradle.internal.os.OperatingSystem
+
+// to fix include order - need windows skd first to successfully being able including "windows.h"
+def getExtraSdkDirs() {
+    return OperatingSystem.current().isWindows() ? ['C:\\Program Files (x86)\\Windows Kits\\8.1\\Include\\shared', "C:\\Program Files (x86)\\Windows Kits\\8.1\\Include\\um"]
+        : [];
+}
+
+def getOSArtifactName(name) {
+    def osPref = OperatingSystem.current().isWindows() ? '' : 'lib'
+    def osSuf = OperatingSystem.current().isWindows() ? 'windows' : 'linux'
+    return "${osPref}${name}-${osSuf}"
+}
+
+model {
+    buildTypes {
+        release
+        //debug
+    }
+    toolChains {
+        visualCpp(VisualCpp) {
+            if (project.findProperty('vs.base') == null) {
+                println "vs.base is not set"
+            } else {
+                println "vs.base: ${project.'vs.base'}"
+                // if omitted - the latest version of MSVC will be used
+                installDir "${project.'vs.base'}"
+                // windowsSdkDir - make ext prop
+            }
+        }
+        gcc(Gcc)
+        //clang(Clang)
+    }
+    platforms {
+        x64 {
+            architecture "x86_64"
+        }
+    }
+    binaries {
+        all {
+            if (targetPlatform.operatingSystem.windows) {
+                println 'platform is win!'
+            }
+            cppCompiler.define "KENLM_MAX_ORDER=6"
+            if (toolChain in VisualCpp) {
+                cppCompiler.args "/EHsc"
+                println "toolChain.windowsSdkDir: ${toolChain.windowsSdkDir}"
+            }
+            if (toolChain in Clang) {
+                println 'toolchain is Clang!'
+                //cppCompiler.args '-std=c++0x'
+                cppCompiler.args '-std=c++0x', '-O0', '-g', '-fsanitize=address', '-fno-omit-frame-pointer'
+                linker.args '-g', '-fsanitize=address'
+            }
+        }
+        withType(SharedLibraryBinarySpec) { // all
+            if (toolChain in Gcc) {
+                println 'toolchain is Gcc!'
+                // "-O2", "-fno-access-control"
+                //cppCompiler.args '-std=c++0x', '-Wno-narrowing'
+            }
+            if (toolChain in VisualCpp) {
+                // cppCompiler.define "DLL_EXPORT"
+                println 'toolchain is VisualCpp!'
+            }
+            if (toolChain in Clang) {
+                println 'toolchain is Clang!'
+            }
+        }
+    }
+    components {
+        clbkenlm(NativeLibrarySpec) { // SharedLibraryBinarySpec
+            targetPlatform 'x64'
+            sources {
+                cpp {
+                    source {
+                        srcDirs 'src/main/cpp/clb'
+                        include '*.cc'
+                        srcDirs 'src/main/cpp/lm'
+                        include '*.cc'
+                        srcDirs 'src/main/cpp/util'
+                        include '*.cc'
+                        srcDirs 'src/main/cpp/util/double-conversion'
+                        include '*.cc'
+                    }
+                    exportedHeaders {
+                        srcDirs 'src/main/cpp'
+                        srcDirs getExtraSdkDirs()
+                    }
+                }
+            }
+        }
+ 	ngq(NativeExecutableSpec) { // SharedLibraryBinarySpec
+            targetPlatform 'x64'
+            sources {
+                cpp {
+                    source {
+                        srcDirs 'src/main/cpp/ngq'
+                        include '*.cc'
+                    }
+                    exportedHeaders {
+                        srcDirs 'src/main/cpp'
+                        //srcDirs getExtraSdkDirs()
+                    }
+                    lib library: "clbkenlm"
+                }
+            }
+        }
+        all {
+            binaries.withType(StaticLibraryBinarySpec) {
+                buildable = false
+            }
+            binaries.withType(SharedLibraryBinarySpec) {
+                // println it.properties it.tasks
+                //println it.component.baseName + ' -> ' + it.sharedLibraryFile
+                project.repositories.moduleshared.dir(it.sharedLibraryFile.parentFile) // println '-> ' + project.repositories.cld2shared.dirs
+                project.publishing.publications.clbkenlm.artifact([source: it.sharedLibraryFile]) // , extension: 'dll'
+                //println '-> ' + project.publishing.publications.cld2.properties
+                //println '-> ' + project.properties
+            }
+        }
+    }
+}
+
+repositories {
+    flatDir {
+        name "moduleshared"
+    }
+}
+
+publishing {
+    publications {
+        clbkenlm(MavenPublication) {
+            groupId 'clarabridge'
+            artifactId getOSArtifactName(name) // project.publishing.publications.${projectName}.name
+            //version version // project.version, semver
+        }
+    }
+    repositories {
+        maven {
+            // change to point to your repo, e.g. http://my.org/repo
+            url project.'nexus.repo' //"$buildDir/repo"
+            credentials {
+                username = project.'nexus.deploy.user'
+                password = project.'nexus.deploy.password'
+            }
+        }
+    }
+}
+
+task dumpVersion() {
+    doLast {
+        println "dump version is: ${project.version}"
+    }
+}
+
+publish.dependsOn build, dumpVersion
+
+// To make a 1.0.0 release, execute the following:
+// $ gradle release -Prelease.stage=final -Prelease.scope=major
